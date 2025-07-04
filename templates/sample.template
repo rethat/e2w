@@ -1,0 +1,34 @@
+
+#setting for header and footer
+<header> <tag_name2/> <image src="img/logo.jpg"></image></header>
+<footer>This content of footer session</footer>
+#end header and footer
+<title>Reporting of <tag_name1/> for <tag_name2/></title>
+
+# https://python-docx.readthedocs.io/en/latest/user/styles-understanding.html#table-styles-in-default-template
+# Example usage
+Defind for h tag, level depends by yourself.
+<h1>h1 heading</h1>
+<h2>h2 heading</h2>
+....
+<h7>h7 heading</h7>
+<h8>h8 heading</h8>
+
+<h1>Heading 1</h1>
+Add an image to the Word document, or replace with a placeholder if the file is missing.    
+<image src="img/product.png"></image>
+<h2>Subheading 1</h2>
+#not exits path for data/demo.csv then show error message.
+<dataframe src="data/demo.csv"></dataframe>
+<h3>Subheading 2</h3>
+<dataframe api="https://api.example.com/products" params="1,2,3"></dataframe>
+Other image is at below
+<image src="img/table.png"></image>
+<h4>Subheading 3</h4>
+<dataframe api="https://api.example.com/summary" params="1,2"></dataframe>
+Add an image to the Word document, or replace with a placeholder if the file is missing.
+    Args:
+        doc (Document): Word document object.
+        image_path (str): Path to the image file.
+#image not found then show error.
+<image src="missing_image.png"></image>
