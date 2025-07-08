@@ -8,9 +8,9 @@ from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_ALIGN_VERTICAL
 import requests
-from styles.page_layout import PageLayout, Orientation, Size
-from styles.font_family import FontFamily, FontStyle
-from styles.table_style import TableFormat
+from src.e2w.styles.page_layout import PageLayout, Orientation, Size
+from src.e2w.styles.font_family import FontFamily, FontStyle
+from src.e2w.styles.table_style import TableFormat
 
 
 class ExportToWord:
