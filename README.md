@@ -17,7 +17,7 @@ Sample to use
             }
         }
 
-    e2w = E2W(
+    e2w = ExportToWord(
         context=context,
         template="templates/sample.template",
         output_path= f"{datetime.now().strftime('%Y%m%d-%H%M%S')}-output.docx"
