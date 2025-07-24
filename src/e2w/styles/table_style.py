@@ -108,5 +108,5 @@ class TableStyle(Enum):
 
 class TableFormat:
 
-    def __init__(self, style: TableStyle = TableStyle.COLORFUL_LIST_ACCENT_6):
+    def __init__(self, style: TableStyle = TableStyle.MEDIUM_SHADING_1_ACCENT_3):
         self.style = style

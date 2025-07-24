@@ -18,7 +18,7 @@ Section break is used to <b>start a new section </b>in the Word document. After 
 
 <h1>Heading 1</h1>
 Add an image to the Word document, or replace with a placeholder if the file is missing.    
-<image src="img/product.png"></image>
+<image height="3" width="7" src="img/product.png"></image>
 <h2>Subheading 1</h2>
 #not exits path for data/demo.csv then show error message.
 <dataframe src="data/demo.csv"></dataframe>

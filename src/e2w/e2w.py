@@ -188,7 +188,13 @@ class ExportToWord:
         _image_path = _image_path.strip()
         if os.path.exists(_image_path):
             _width, _height = self._get_image_size(_image_path, height) if height != 0.0 else self._get_image_size(_image_path)
-            if _width > self.image_max_size[0] or _height > self.image_max_size[1]:
+            _tag_width, _tag_height = tag.get('width', None), tag.get('height', None)
+            if _tag_width or _tag_height:
+                if _tag_width:
+                    _width = Inches(float(_tag_width))
+                if _tag_height:
+                    _height = Inches(float(_tag_height))
+            elif _width > self.image_max_size[0] or _height > self.image_max_size[1]:
                 _width = min(_width, self.image_max_size[0])
                 _height = min(_height, self.image_max_size[1])
             run = paragraph.add_run()
@@ -259,8 +265,8 @@ class ExportToWord:
             self._set_error_font_style(run)
             return
         
-        table = self.document.add_table(rows=1, cols=len(df.columns))
-        table.style = self.table_style.style.value
+        table = self.document.add_table(rows=1, cols=len(df.columns), style=self.table_style.style.value)
+        # table.style = self.table_style.style.value
         table.autofit = True
         # header processing
         hdr_cells = table.rows[0].cells
