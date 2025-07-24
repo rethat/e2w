@@ -13,6 +13,8 @@ Defind for h tag, level depends by yourself.
 ....
 <h7>h7 heading</h7>
 <h8>h8 heading</h8>
+Section break is used to <b>start a new section </b>in the Word document. After <u><i>this line is</i></u> session break.
+<session_break/>
 
 <h1>Heading 1</h1>
 Add an image to the Word document, or replace with a placeholder if the file is missing.    
@@ -20,8 +22,13 @@ Add an image to the Word document, or replace with a placeholder if the file is 
 <h2>Subheading 1</h2>
 #not exits path for data/demo.csv then show error message.
 <dataframe src="data/demo.csv"></dataframe>
+
+<p align="right">After this line, a new page will start. </p>
+<page_break/>
+
+
 <h3>Subheading 2</h3>
-<dataframe api="https://api.example.com/products" params="1,2,3"></dataframe>
+<dataframe api="http://localhost:5000/v1.0/db-sql-full-scan" params="1,2,3"></dataframe>
 Other image is at below
 <image src="img/table.png"></image>
 <h4>Subheading 3</h4>

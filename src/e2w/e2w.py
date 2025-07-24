@@ -21,6 +21,7 @@ class ExportToWord:
                  font_family: FontFamily = FontFamily(),
                  table_style: TableFormat = TableFormat(),
                  heading_levels: int = 6,
+                 image_max_size: tuple = (5.3, 3.5),  # Default max size for images in inches
                  error_font: FontFamily = FontFamily(name="Arial", size=8, style=FontStyle.ITALIC, color=RGBColor(255,0,0))
                  ):
         '''Initialize the E2W class with context, template path, and output path.'''
@@ -37,24 +38,63 @@ class ExportToWord:
         self.page_dimensions = page_layout.size
         self.table_style = table_style
         self.heading_levels = heading_levels
+        self.image_max_size = (Inches(image_max_size[0]), Inches(image_max_size[1]))  
+        self.align_paragraph = {
+            'left': WD_ALIGN_PARAGRAPH.LEFT,
+            'right': WD_ALIGN_PARAGRAPH.RIGHT,
+            'center': WD_ALIGN_PARAGRAPH.CENTER,
+            'justify': WD_ALIGN_PARAGRAPH.JUSTIFY
+        }
         self.document = self._document_setup()
-
 
     def render(self):
         '''Render word document from template'''
         cleaned_template = self._clean_template()
         _content = self._replace_variables(cleaned_template)
+        _content = self._format_template_to_html(_content)
+
         soup = BeautifulSoup(_content, 'html.parser')
 
-        # Fetch all tags in template content
-        for tag in soup.find_all(True):
-            handler = self._tag_handlers().get(tag.name)
-            if handler:
-                handler(tag)
-            else:
-                self._add_paragraph(tag)
-
+        for tag in soup.contents:
+            if isinstance(tag, Tag):
+                handler = self._tag_handlers().get(tag.name)
+                handler(tag) if handler else self._add_paragraph(tag)
+        # Save the document to the specified output path
         self.document.save(self.output_path)
+
+
+    def _format_template_to_html(self, content: str) -> str:
+        """Chuyển nội dung template thành HTML sạch, giữ dòng trống thật, bỏ comment."""
+        lines = content.splitlines()
+        html_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue  
+            if stripped.startswith("#"):
+                continue  
+            if not stripped.startswith("<"):
+                html_lines.append(f"<p>{stripped}</p>")
+            else:
+                html_lines.append(stripped)
+        return "\n".join(html_lines)
+        
+    def _tag_handlers(self):
+        """Mapping of tag names to handler methods."""
+        return {
+            'header': lambda tag : self._handle_header_footer(self.document.sections[0], tag),
+            'footer': lambda tag: self._handle_header_footer(self.document.sections[0], tag),
+            'title': self._handle_title,
+            **{f'h{i}': self._handle_heading for i in range(1, self.heading_levels+1)},  # h1 to h6
+            # 'image': lambda tag: self._handle_image(tag.get('src')) if tag.get('src') else None,
+            'image': self._handle_image, 
+            'dataframe': self._handle_dataframe,
+            'base64-image': self._handle_base64_image,
+            'session_break': self._handle_add_section, 
+            'page_break': self._handle_add_page_break, 
+            'p': self._add_paragraph,
+        }
+    
 
     def _document_setup(self):
         """Document setup such as page size, orientation, font family, font style, etc."""
@@ -68,6 +108,7 @@ class ExportToWord:
         else:
             section.page_width = Inches(_width)
             section.page_height = Inches(_height)
+        self._set_margins(section, top=1.0, bottom=1.0, left=1.25, right=1.25)
 
         # Set up the default font family for the document.
         style = document.styles[self.font_family.style.value]
@@ -76,6 +117,12 @@ class ExportToWord:
         style.font.color.rgb = self.font_family.color
         return document
     
+    def _set_margins(self, section, top: float = 1.0, bottom: float = 1.0, left: float = 1.25, right: float = 1.25):
+        """Set the margins for the document section."""
+        section.top_margin = Inches(top)
+        section.bottom_margin = Inches(bottom)
+        section.left_margin = Inches(left)
+        section.right_margin = Inches(right)
 
     def _set_error_font_style(self, run):
         '''Change the font color to red and italicize it.'''
@@ -88,18 +135,6 @@ class ExportToWord:
             run.font.bold = True    
 
 
-    def _tag_handlers(self):
-        """Mapping of tag names to handler methods."""
-        return {
-            'header': lambda tag : self._handle_header_footer(self.document.sections[0], tag),
-            'footer': lambda tag: self._handle_header_footer(self.document.sections[0], tag),
-            'title': self._handle_title,
-            **{f'h{i}': self._handle_heading for i in range(1, self.heading_levels+1)},  # h1 to h6
-            'image': lambda tag: self._handle_image(tag.get('src')) if tag.get('src') else None,
-            'dataframe': self._handle_dataframe,
-            'base64-image': self._handle_base64_image
-        }
-    
     def _clean_template(self):
         """Remove all comments in the template content. 
         That is, lines starting with #."""
@@ -135,22 +170,31 @@ class ExportToWord:
         _last_cell = table.rows[0].cells[-1]
         _image = tag.find('image')
         if _image and 'src' in _image.attrs:        
-            self._handle_image(_image['src'], aligment=WD_ALIGN_PARAGRAPH.RIGHT, 
+            self._handle_image(_image, aligment='right', 
                                paragraph=_last_cell.paragraphs[0], height=_height) 
             
-    def _handle_image(self, image_path: str, 
-                      aligment: WD_ALIGN_PARAGRAPH = WD_ALIGN_PARAGRAPH.CENTER,
+    def _handle_image(self, tag: Tag, #image_path: str, 
+                      aligment: str = 'center',
                       paragraph=None, 
                       height: float = 0.0):
         """Insert an image into the document."""
+        _image_path = tag.get('src', None)
+        if not _image_path:
+            raise ValueError("Image tag must have a 'src' attribute.")
+        _align = tag.get('align', aligment).lower()
+        _aligntment = self.align_paragraph.get(_align, WD_ALIGN_PARAGRAPH.CENTER)
         paragraph = self.document.add_paragraph() if paragraph is None else paragraph
-        paragraph.alignment = aligment
-        if os.path.exists(image_path):            
-            _width, _height = self._get_image_size(image_path, height) if height != 0.0 else self._get_image_size(image_path)
+        paragraph.alignment = _aligntment 
+        _image_path = _image_path.strip()
+        if os.path.exists(_image_path):
+            _width, _height = self._get_image_size(_image_path, height) if height != 0.0 else self._get_image_size(_image_path)
+            if _width > self.image_max_size[0] or _height > self.image_max_size[1]:
+                _width = min(_width, self.image_max_size[0])
+                _height = min(_height, self.image_max_size[1])
             run = paragraph.add_run()
-            run.add_picture(image_path, width=Inches(_width), height=Inches(_height))            
+            run.add_picture(_image_path, _width, _height)
         else:
-            run = paragraph.add_run(f"[Missing image: {image_path}]")
+            run = paragraph.add_run(f"[Missing image: {_image_path}]")
             self._set_error_font_style(run)
 
 
@@ -173,7 +217,7 @@ class ExportToWord:
                 target_height = target_width / aspect_ratio
             else:
                 target_width = target_height * aspect_ratio
-        return (target_width, target_height)
+        return (Inches(target_width), Inches(target_height))
     
     def _handle_title(self, tag: Tag):
         '''Handle the title tag in the template.'''
@@ -230,10 +274,45 @@ class ExportToWord:
                 row_cells[i].text = str(value) if value else ''
                 row_cells[i].paragraphs[0].runs[0].bold=False
 
-    def _add_paragraph(self, tag: Tag):
-        text = tag.strip() if isinstance(tag, NavigableString) else  str(tag).strip()
-        if text:
-            self.document.add_paragraph(text)
+    def _handle_add_section(self, tag: Tag):
+        """Handle session break in the template."""
+        section = self.document.add_section()
+        self._set_margins(section)
+    
+    def _handle_add_page_break(self, tag: Tag):
+        """Handle page break in the template."""
+        self.document.add_page_break()
+        self._set_margins(self.document.sections[-1])
+
+    def _add_paragraph(self, tag):
+        '''Add a paragraph from either a Tag or a plain text line.'''
+        para = self.document.add_paragraph()
+        if isinstance(tag, Tag):
+            if 'align' in tag.attrs:
+                para.alignment = self.align_paragraph.get(tag.get('align', '').lower(), WD_ALIGN_PARAGRAPH.LEFT)
+            self._handle_inline_formatting(tag, para)
+        elif isinstance(tag, str):
+            _text = tag.strip()
+            if _text:
+                para.add_run(_text)
+
+    def _handle_inline_formatting(self, element: Tag, para):
+        """Recursively process inline tags <b>, <i>, <u> and normal text into the same paragraph."""
+        def recurse(node, bold=False, italic=False, underline=False):
+            if isinstance(node, NavigableString):
+                text = str(node)
+                if text.strip():
+                    run = para.add_run(text)
+                    run.bold = bold
+                    run.italic = italic
+                    run.underline = underline
+            elif isinstance(node, Tag):
+                next_bold = bold or (node.name == 'b')
+                next_italic = italic or (node.name == 'i')
+                next_underline = underline or (node.name == 'u')
+                for child in node.children:
+                    recurse(child, next_bold, next_italic, next_underline)
+        recurse(element)
 
     def _replace_variables(self, text: str) -> str:
         """Replace placeholders in the content with values from the context."""
