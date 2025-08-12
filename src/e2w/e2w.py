@@ -8,6 +8,10 @@ from docx import Document
 from docx.shared import Pt, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_ALIGN_VERTICAL
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
+from typing import List, Dict, Any, Optional
+import gc
 from .styles.page_layout import PageLayout, Orientation, Size
 from .styles.font_family import FontFamily, FontStyle
 from .styles.table_style import TableFormat
@@ -25,11 +29,17 @@ class ExportToWord:
                  table_style: TableFormat = TableFormat(),
                  heading_levels: int = 6,
                  image_max_size: tuple = (5.3, 3.5),  # Default max size for images in inches
-                 error_font: FontFamily = FontFamily(name="Arial", size=8, style=FontStyle.ITALIC, color=RGBColor(255,0,0))
+                 error_font: FontFamily = FontFamily(name="Arial", size=8, style=FontStyle.ITALIC, color=RGBColor(255,0,0)),
+                 max_workers: int = 4,  # Number of threads for multithreading
+                 chunk_size: int = 1000  # Memory management: process data in chunks
                  ):
         '''Initialize the E2W class with context, template path, and output path.'''
         self.template_content = ""
         self.context = context or {}
+        self.max_workers = max_workers
+        self.chunk_size = chunk_size
+        self._lock = threading.Lock()  # Thread safety for document operations
+        
         if template_file:
             if not context:
                 raise ValueError("If temp_file is provided, context must not be None.")
@@ -60,31 +70,115 @@ class ExportToWord:
         self.document = self._document_setup()
 
     def render(self):
-        '''Render word document from template'''
+        '''Render word document from template with multithreading support'''
         soup = BeautifulSoup(self.template_content, 'html.parser')
-        for tag in soup.contents:
-            if isinstance(tag, Tag):
-                handler = self._tag_handlers().get(tag.name)
-                handler(tag) if handler else self._add_paragraph(tag)
+        
+        # Process tags in parallel for better performance
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all tag processing tasks
+            future_to_tag = {
+                executor.submit(self._process_tag, tag): tag 
+                for tag in soup.contents if isinstance(tag, Tag)
+            }
+            
+            # Process completed tasks
+            for future in as_completed(future_to_tag):
+                try:
+                    future.result()
+                except Exception as e:
+                    # Log error and continue with other tags
+                    print(f"Error processing tag: {e}")
+                    continue
+        
         # Save the document to the specified output path
         self.document.save(self.output_path)
+        
+        # Clean up memory
+        gc.collect()
 
+    def _process_tag(self, tag: Tag):
+        """Process a single tag with thread safety."""
+        try:
+            handler = self._tag_handlers().get(tag.name)
+            if handler:
+                with self._lock:
+                    handler(tag)
+            else:
+                with self._lock:
+                    self._add_paragraph(tag)
+        except Exception as e:
+            print(f"Error processing tag {tag.name}: {e}")
 
     def _format_template_to_html(self, content: str) -> str:
-        """Convert content to HTML tag, keep empty line and remove comment."""
+        """Convert content to HTML tag, properly handle empty lines and HTML tags."""
         lines = content.splitlines()
         html_lines = []
+        in_html_block = False
+        current_html_block = []
+        
         for line in lines:
             stripped = line.strip()
+            
+            # Handle empty lines - preserve them as <br/> tags
             if not stripped:
-                continue  
+                if in_html_block:
+                    # If we're in an HTML block, add a line break
+                    current_html_block.append("<br/>")
+                else:
+                    # If we're in text mode, add a paragraph break
+                    html_lines.append("<p></p>")
+                continue
+            
+            # Handle comments
             if stripped.startswith("#"):
-                continue  
-            if not stripped.startswith("<"):
-                html_lines.append(f"<p>{stripped}</p>")
+                continue
+            
+            # Check if this line contains HTML tags
+            if self._contains_html_tags(stripped):
+                # If we were building a text block, close it first
+                if not in_html_block and current_html_block:
+                    html_lines.append(f"<p>{''.join(current_html_block)}</p>")
+                    current_html_block = []
+                
+                # Process HTML line
+                if self._is_complete_html_tag(stripped):
+                    # Complete HTML tag on single line
+                    html_lines.append(stripped)
+                else:
+                    # Multi-line HTML tag
+                    in_html_block = True
+                    current_html_block.append(stripped)
             else:
-                html_lines.append(stripped)
+                # Text line
+                if in_html_block:
+                    # Close HTML block and start text
+                    html_lines.append(''.join(current_html_block))
+                    current_html_block = []
+                    in_html_block = False
+                
+                # Add text as paragraph
+                current_html_block.append(stripped)
+        
+        # Handle any remaining content
+        if current_html_block:
+            if in_html_block:
+                html_lines.append(''.join(current_html_block))
+            else:
+                html_lines.append(f"<p>{''.join(current_html_block)}</p>")
+        
         return "\n".join(html_lines)
+    
+    def _contains_html_tags(self, line: str) -> bool:
+        """Check if a line contains HTML tags."""
+        return '<' in line and '>' in line
+    
+    def _is_complete_html_tag(self, line: str) -> bool:
+        """Check if a line contains a complete HTML tag."""
+        # Simple heuristic: check if line starts and ends with tags
+        # or contains balanced tags
+        open_tags = line.count('<')
+        close_tags = line.count('>')
+        return open_tags == close_tags and open_tags > 0
         
     def _tag_handlers(self):
         """Mapping of tag names to handler methods."""
@@ -187,54 +281,77 @@ class ExportToWord:
                       aligment: str = 'center',
                       paragraph=None, 
                       height: float = 0.0):
-        """Insert an image into the document."""
+        """Insert an image into the document with improved error handling and memory management."""
         _image_path = tag.get('src', None)
         if not _image_path:
-            raise ValueError("Image tag must have a 'src' attribute.")
+            self._add_error_paragraph("Image tag must have a 'src' attribute.")
+            return
+            
         _align = tag.get('align', aligment).lower()
         _aligntment = self.align_paragraph.get(_align, WD_ALIGN_PARAGRAPH.CENTER)
         paragraph = self.document.add_paragraph() if paragraph is None else paragraph
         paragraph.alignment = _aligntment 
         _image_path = _image_path.strip()
-        if os.path.exists(_image_path):
-            _width, _height = self._get_image_size(_image_path, height) if height != 0.0 else self._get_image_size(_image_path)
-            _tag_width, _tag_height = tag.get('width', None), tag.get('height', None)
-            if _tag_width or _tag_height:
-                if _tag_width:
-                    _width = Inches(float(_tag_width))
-                if _tag_height:
-                    _height = Inches(float(_tag_height))
-            elif _width > self.image_max_size[0] or _height > self.image_max_size[1]:
-                _width = min(_width, self.image_max_size[0])
-                _height = min(_height, self.image_max_size[1])
-            run = paragraph.add_run()
-            run.add_picture(_image_path, _width, _height)
-        else:
-            run = paragraph.add_run(f"[Missing image: {_image_path}]")
+        
+        try:
+            if os.path.exists(_image_path):
+                _width, _height = self._get_image_size(_image_path, height) if height != 0.0 else self._get_image_size(_image_path)
+                _tag_width, _tag_height = tag.get('width', None), tag.get('height', None)
+                
+                if _tag_width or _tag_height:
+                    if _tag_width:
+                        _width = Inches(float(_tag_width))
+                    if _tag_height:
+                        _height = Inches(float(_tag_height))
+                elif _width > self.image_max_size[0] or _height > self.image_max_size[1]:
+                    _width = min(_width, self.image_max_size[0])
+                    _height = min(_height, self.image_max_size[1])
+                
+                run = paragraph.add_run()
+                run.add_picture(_image_path, _width, _height)
+                
+                # Clean up memory after adding image
+                gc.collect()
+            else:
+                run = paragraph.add_run(f"[Missing image: {_image_path}]")
+                self._set_error_font_style(run)
+        except Exception as e:
+            error_msg = f"[Error loading image {_image_path}: {e}]"
+            run = paragraph.add_run(error_msg)
             self._set_error_font_style(run)
 
-
     def _get_image_size(self, image_path: str, target_height: float = 0.0) -> tuple:
-        """Calculates the target size for the image while preserving the aspect ratio.
+        """Calculates the target size for the image while preserving the aspect ratio with memory optimization."""
+        try:
+            from PIL import Image
+            with Image.open(image_path) as img:
+                img_width, img_height = img.size
+                aspect_ratio = img_width / img_height
+                
+                if target_height == 0.0:
+                    target_width = self.page_dimensions[0] * 0.6
+                    target_height = target_width / aspect_ratio
+                else:
+                    target_width = target_height * aspect_ratio
+                
+                # Ensure dimensions don't exceed page limits
+                max_width = self.page_dimensions[0] * 0.9
+                max_height = self.page_dimensions[1] * 0.8
+                
+                if target_width > max_width:
+                    target_width = max_width
+                    target_height = target_width / aspect_ratio
+                
+                if target_height > max_height:
+                    target_height = max_height
+                    target_width = target_height * aspect_ratio
+                
+                return (Inches(target_width), Inches(target_height))
+        except Exception as e:
+            print(f"Error calculating image size: {e}")
+            # Return default size on error
+            return (Inches(4), Inches(3))
 
-        Args:
-            image_path (str): Path to the image file.
-            target_height (float): Desired height of the image in inches.
-
-        Returns:
-            tuple: Width and height of the image in inches.
-        """
-        from PIL import Image
-        with Image.open(image_path) as img:
-            img_width, img_height = img.size
-            aspect_ratio = img_width / img_height
-            if target_height == 0.0:
-                target_width = self.page_dimensions[0] * 0.6
-                target_height = target_width / aspect_ratio
-            else:
-                target_width = target_height * aspect_ratio
-        return (Inches(target_width), Inches(target_height))
-    
     def _handle_title(self, tag: Tag):
         '''Handle the title tag in the template.'''
         paragraph = self.document.add_paragraph()
@@ -275,11 +392,22 @@ class ExportToWord:
                     row_cells[i].paragraphs[0].runs[0].bold = False
 
     def _handle_dataframe(self, tag: Tag):
-        """Handle the dataframe tag in the template."""
+        """Handle the dataframe tag in the template with improved memory management and index removal."""
         df = pd.DataFrame()
         if 'src' in tag.attrs:
             if os.path.exists(tag['src']):
-                df = pd.read_csv(tag['src']) 
+                try:
+                    # Read CSV in chunks for memory efficiency
+                    chunk_list = []
+                    for chunk in pd.read_csv(tag['src'], chunksize=self.chunk_size):
+                        chunk_list.append(chunk)
+                    if chunk_list:
+                        df = pd.concat(chunk_list, ignore_index=True)
+                        del chunk_list  # Free memory
+                        gc.collect()
+                except Exception as e:
+                    self._add_error_paragraph(f"Error reading CSV file: {e}")
+                    return
         elif 'api' in tag.attrs:
             api_url = tag['api']
             api_config = self.context.get('apis',{}).get(api_url, {})
@@ -292,27 +420,89 @@ class ExportToWord:
                     if data:
                         df = pd.DataFrame(data.get('data',{}))
             except Exception as e:
-                self._add_paragraph(str(e))
+                self._add_error_paragraph(f"API Error: {e}")
+                return
+        
         if df.empty:
-            paragraph = self.document.add_paragraph()
-            run = paragraph.add_run(f"{tag.get_text()} No data available.")
-            self._set_error_font_style(run)
+            self._add_error_paragraph(f"{tag.get_text()} No data available.")
             return
         
-        table = self.document.add_table(rows=1, cols=len(df.columns), style=self.table_style.style.value)
-        # table.style = self.table_style.style.value
+        # Remove index column if it's the default pandas index
+        if df.index.name is None and df.index.dtype == 'int64':
+            df = df.reset_index(drop=True)
+        
+        # Get table attributes for customization
+        table_style = tag.get('style', self.table_style.style.value)
+        max_rows = int(tag.get('max_rows', 0))  # 0 means all rows
+        
+        # Limit rows if specified
+        if max_rows > 0 and len(df) > max_rows:
+            df = df.head(max_rows)
+        
+        # Create table with proper styling
+        table = self.document.add_table(rows=1, cols=len(df.columns), style=table_style)
         table.autofit = True
-        # header processing
+        
+        # Process header
         hdr_cells = table.rows[0].cells
         for i, column in enumerate(df.columns):
-            hdr_cells[i].text = column
-            hdr_cells[i].paragraphs[0].runs[0].bold=True
-        # content processing
+            hdr_cells[i].text = str(column)
+            hdr_cells[i].paragraphs[0].runs[0].bold = True
+        
+        # Process data in chunks for memory efficiency
+        total_rows = len(df)
+        if total_rows > self.chunk_size:
+            # Process large datasets in chunks with multithreading
+            self._process_dataframe_chunks(df, table, total_rows)
+        else:
+            # Process small datasets directly
+            self._process_dataframe_rows(df, table)
+        
+        # Clean up memory
+        del df
+        gc.collect()
+    
+    def _process_dataframe_chunks(self, df: pd.DataFrame, table, total_rows: int):
+        """Process large dataframes in chunks with multithreading."""
+        chunks = [df.iloc[i:i+self.chunk_size] for i in range(0, total_rows, self.chunk_size)]
+        
+        with ThreadPoolExecutor(max_workers=min(self.max_workers, len(chunks))) as executor:
+            # Submit chunk processing tasks
+            future_to_chunk = {
+                executor.submit(self._process_chunk, chunk, table): chunk 
+                for chunk in chunks
+            }
+            
+            # Process completed chunks
+            for future in as_completed(future_to_chunk):
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"Error processing dataframe chunk: {e}")
+                    continue
+    
+    def _process_chunk(self, chunk: pd.DataFrame, table):
+        """Process a single chunk of dataframe data."""
+        with self._lock:
+            for _, row in chunk.iterrows():
+                row_cells = table.add_row().cells
+                for i, value in enumerate(row):
+                    row_cells[i].text = str(value) if pd.notna(value) else ''
+                    row_cells[i].paragraphs[0].runs[0].bold = False
+    
+    def _process_dataframe_rows(self, df: pd.DataFrame, table):
+        """Process dataframe rows directly for small datasets."""
         for _, row in df.iterrows():
             row_cells = table.add_row().cells
             for i, value in enumerate(row):
-                row_cells[i].text = str(value) if value else ''
-                row_cells[i].paragraphs[0].runs[0].bold=False
+                row_cells[i].text = str(value) if pd.notna(value) else ''
+                row_cells[i].paragraphs[0].runs[0].bold = False
+    
+    def _add_error_paragraph(self, message: str):
+        """Add an error message paragraph with error styling."""
+        paragraph = self.document.add_paragraph()
+        run = paragraph.add_run(message)
+        self._set_error_font_style(run)
 
     def _handle_add_section(self, tag: Tag):
         """Handle session break in the template."""
@@ -356,12 +546,106 @@ class ExportToWord:
 
     def _replace_variables(self, text: str) -> str:
         """Replace placeholders in the content with values from the context."""
-        for key, value in self.context.items():
-            placeholder = f"<{key}/>"
-            if placeholder in text:
-                text = text.replace(placeholder, str(value))
-        return text 
+        try:
+            for key, value in self.context.items():
+                placeholder = f"<{key}/>"
+                if placeholder in text:
+                    # Handle different data types
+                    if isinstance(value, (list, tuple)):
+                        # Convert lists to comma-separated strings
+                        text = text.replace(placeholder, ', '.join(map(str, value)))
+                    elif isinstance(value, dict):
+                        # Convert dicts to formatted strings
+                        formatted_dict = '\n'.join([f"{k}: {v}" for k, v in value.items()])
+                        text = text.replace(placeholder, formatted_dict)
+                    else:
+                        text = text.replace(placeholder, str(value))
+            return text
+        except Exception as e:
+            print(f"Error replacing variables: {e}")
+            return text
     
+    def validate_template(self) -> Dict[str, Any]:
+        """Validate the template content and return validation results."""
+        validation_result = {
+            'is_valid': True,
+            'errors': [],
+            'warnings': [],
+            'tag_count': 0,
+            'variable_count': 0
+        }
+        
+        try:
+            # Check for basic HTML structure
+            soup = BeautifulSoup(self.template_content, 'html.parser')
+            validation_result['tag_count'] = len(soup.find_all())
+            
+            # Count variables
+            import re
+            variable_pattern = r'<(\w+)/>'
+            variables = re.findall(variable_pattern, self.template_content)
+            validation_result['variable_count'] = len(set(variables))
+            
+            # Check for missing variables in context
+            missing_vars = []
+            for var in set(variables):
+                if var not in self.context:
+                    missing_vars.append(var)
+                    validation_result['warnings'].append(f"Variable '{var}' not found in context")
+            
+            if missing_vars:
+                validation_result['warnings'].append(f"Missing variables: {', '.join(missing_vars)}")
+            
+            # Check for syntax errors
+            try:
+                soup = BeautifulSoup(self.template_content, 'html.parser')
+            except Exception as e:
+                validation_result['is_valid'] = False
+                validation_result['errors'].append(f"HTML parsing error: {e}")
+                
+        except Exception as e:
+            validation_result['is_valid'] = False
+            validation_result['errors'].append(f"Validation error: {e}")
+        
+        return validation_result
+    
+    def export_template_to_html(self, output_path: str = None) -> str:
+        """Export the processed template to an HTML file for preview."""
+        if not output_path:
+            output_path = self.output_path.replace('.docx', '.html')
+        
+        try:
+            # Create a clean HTML version
+            html_content = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Template Preview</title>
+    <style>
+        body {{ font-family: Arial, sans-serif; margin: 20px; }}
+        table {{ border-collapse: collapse; width: 100%; margin: 10px 0; }}
+        th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
+        th {{ background-color: #f2f2f2; font-weight: bold; }}
+        .error {{ color: red; font-style: italic; }}
+        h1, h2, h3, h4, h5, h6 {{ color: #333; }}
+    </style>
+</head>
+<body>
+{self.template_content}
+</body>
+</html>
+            """
+            
+            with open(output_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            return output_path
+            
+        except Exception as e:
+            print(f"Error exporting HTML: {e}")
+            return None
+
     def _handle_base64_image(self, tag: Tag):
         """Handle base64 encoded images in the template."""
         import base64
@@ -376,10 +660,12 @@ class ExportToWord:
                 image_bytes = base64.b64decode(image_data)
                 image_stream = BytesIO(image_bytes)
                 self.document.add_picture(image_stream, width=Inches(4))
+                # Clean up memory
+                del image_bytes
+                image_stream.close()
+                gc.collect()
             except Exception as e:
-                paragraph = self.document.add_paragraph()
-                run = paragraph.add_run(f"[Error loading image {tag.name}: {e}]")
-                self._set_run_font_style(run, font_style=FontStyle.ITALIC)
+                self._add_error_paragraph(f"[Error loading image {tag.name}: {e}]")
 
     def _handle_list(self, tag: Tag):
         """Handle <ul> or <ol> as bullet or numbered list."""
@@ -392,3 +678,62 @@ class ExportToWord:
             # Xử lý nested list (ul/ol trong li)
             for nested in li.find_all(['ul', 'ol'], recursive=False):
                 self._handle_list(nested)
+
+    def cleanup_memory(self):
+        """Clean up memory and resources."""
+        gc.collect()
+        
+    def get_memory_usage(self) -> Dict[str, Any]:
+        """Get current memory usage information."""
+        import psutil
+        import os
+        
+        process = psutil.Process(os.getpid())
+        memory_info = process.memory_info()
+        
+        return {
+            'rss': memory_info.rss / 1024 / 1024,  # MB
+            'vms': memory_info.vms / 1024 / 1024,  # MB
+            'percent': process.memory_percent()
+        }
+    
+    def optimize_for_large_datasets(self, chunk_size: int = 500):
+        """Optimize settings for processing large datasets."""
+        self.chunk_size = chunk_size
+        self.max_workers = min(4, os.cpu_count() or 1)
+        
+    def set_table_limits(self, max_rows: int = 10000, max_columns: int = 100):
+        """Set limits for table processing to prevent memory issues."""
+        self.max_table_rows = max_rows
+        self.max_table_columns = max_columns
+
+    def get_performance_stats(self) -> Dict[str, Any]:
+        """Get performance statistics for the current export operation."""
+        import time
+        if hasattr(self, '_start_time'):
+            elapsed_time = time.time() - self._start_time
+            memory_usage = self.get_memory_usage()
+            
+            return {
+                'elapsed_time': elapsed_time,
+                'memory_usage': memory_usage,
+                'template_size': len(self.template_content),
+                'context_variables': len(self.context)
+            }
+        return {}
+    
+    def start_performance_monitoring(self):
+        """Start performance monitoring for the export operation."""
+        import time
+        self._start_time = time.time()
+        self._initial_memory = self.get_memory_usage()
+    
+    def stop_performance_monitoring(self) -> Dict[str, Any]:
+        """Stop performance monitoring and return final stats."""
+        if hasattr(self, '_start_time'):
+            final_stats = self.get_performance_stats()
+            final_stats['peak_memory'] = self._initial_memory
+            delattr(self, '_start_time')
+            delattr(self, '_initial_memory')
+            return final_stats
+        return {}
